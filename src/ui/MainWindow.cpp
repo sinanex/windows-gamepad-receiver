@@ -2,6 +2,18 @@
 #include <string>
 #include <sstream>
 #include <iomanip>
+#include <vector>
+
+// QR code (single-header, zero-dependency encoder)
+#include "../utils/QrCode.h"
+
+// IP detection
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <iphlpapi.h>
+#include <ws2tcpip.h>
 
 namespace GamepadReceiver {
 
@@ -35,7 +47,7 @@ bool MainWindow::create(int nCmdShow) {
         CLASS_NAME,
         L"Virtual Gamepad Receiver (120Hz UDP)",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 740, 560,
+        CW_USEDEFAULT, CW_USEDEFAULT, 900, 560,
         nullptr, nullptr, m_hInstance, this
     );
 
@@ -196,12 +208,14 @@ void MainWindow::onPaint(HWND hWnd) {
     DeleteObject(pillBrush);
 
     SetTextColor(hdc, RGB(241, 245, 249));
-    std::wstring statusStr = L"STATUS: " + std::wstring(m_connectionManager.getStatusString().begin(), m_connectionManager.getStatusString().end());
+    std::string rawStatus = m_connectionManager.getStatusString();
+    std::wstring statusStr = L"STATUS: " + std::wstring(rawStatus.begin(), rawStatus.end());
     TextOutW(hdc, 332, 18, statusStr.c_str(), (int)statusStr.length());
 
     // Backend info
     SetTextColor(hdc, RGB(148, 163, 184));
-    std::wstring backendStr = L"Backend: " + std::wstring(m_connectionManager.getGamepadBackendString().begin(), m_connectionManager.getGamepadBackendString().end());
+    std::string rawBackend = m_connectionManager.getGamepadBackendString();
+    std::wstring backendStr = L"Backend: " + std::wstring(rawBackend.begin(), rawBackend.end());
     TextOutW(hdc, 24, 52, backendStr.c_str(), (int)backendStr.length());
 
     // Divider
@@ -251,6 +265,48 @@ void MainWindow::onPaint(HWND hWnd) {
 
     // 6. Right Analog Stick
     drawStick(hdc, 430, 370, 60, state.rightX, state.rightY, L"RIGHT STICK");
+
+    // ── QR Code Panel ─────────────────────────────────────────────────────
+    // Panel background
+    int qrPanelX = 750;
+    RECT qrPanel{qrPanelX, 78, width - 10, height - 10};
+    HBRUSH qrPanelBrush = CreateSolidBrush(RGB(21, 31, 52));
+    FillRect(hdc, &qrPanel, qrPanelBrush);
+    DeleteObject(qrPanelBrush);
+
+    // Panel border
+    HPEN qrBorder = CreatePen(PS_SOLID, 1, RGB(51, 65, 85));
+    HPEN qrOldPen = (HPEN)SelectObject(hdc, qrBorder);
+    HBRUSH qrNullBrush = (HBRUSH)GetStockObject(NULL_BRUSH);
+    HBRUSH qrOldBrush = (HBRUSH)SelectObject(hdc, qrNullBrush);
+    Rectangle(hdc, qrPanelX, 78, width - 10, height - 10);
+    SelectObject(hdc, qrOldPen);
+    SelectObject(hdc, qrOldBrush);
+    DeleteObject(qrBorder);
+
+    // Title label
+    SetTextColor(hdc, RGB(148, 163, 184));
+    TextOutW(hdc, qrPanelX + 14, 90, L"Scan to Connect", 15);
+
+    // Regenerate QR if IP/port changed or not yet generated
+    auto recvState = m_connectionManager.getReceiver().getState();
+    if (recvState != ReceiverState::Stopped) {
+        regenerateQr();
+        if (!m_qrMatrix.empty()) {
+            drawQrCode(hdc, qrPanelX + 18, 115, 4);
+
+            // Show encoded string below QR
+            std::wstring qrLabel(m_qrLastEncoded.begin(), m_qrLastEncoded.end());
+            SetTextColor(hdc, RGB(99, 102, 241));
+            TextOutW(hdc, qrPanelX + 14, 115 + (int)m_qrMatrix.size() * 4 + 8,
+                     qrLabel.c_str(), (int)qrLabel.size());
+        }
+    } else {
+        // Show placeholder when receiver is stopped
+        SetTextColor(hdc, RGB(71, 85, 105));
+        TextOutW(hdc, qrPanelX + 18, 200, L"Start receiver", 14);
+        TextOutW(hdc, qrPanelX + 18, 220, L"to show QR", 10);
+    }
 
     // Blit to screen
     BitBlt(hdcWindow, 0, 0, width, height, hdc, 0, 0, SRCCOPY);
@@ -361,6 +417,78 @@ void MainWindow::drawDpad(HDC hdc, int centerX, int centerY, uint8_t dpadMask) {
 
     SetTextColor(hdc, RGB(148, 163, 184));
     TextOutW(hdc, centerX - 18, centerY + 45, L"D-PAD", 5);
+}
+
+// ── QR Code helpers ──────────────────────────────────────────────────────────
+
+std::string MainWindow::getLocalIpAddress() {
+    // Walk IPv4 adapters, return first non-loopback UP address
+    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    ULONG bufLen = 0;
+    GetAdaptersAddresses(AF_INET, flags, nullptr, nullptr, &bufLen);
+    if (bufLen == 0) return "?.?.?.?";
+
+    std::vector<uint8_t> buf(bufLen);
+    auto* adapter = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
+    if (GetAdaptersAddresses(AF_INET, flags, nullptr, adapter, &bufLen) != NO_ERROR)
+        return "?.?.?.?";
+
+    for (; adapter; adapter = adapter->Next) {
+        if (adapter->OperStatus != IfOperStatusUp) continue;
+        if (adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+        for (auto* ua = adapter->FirstUnicastAddress; ua; ua = ua->Next) {
+            auto* sa = reinterpret_cast<sockaddr_in*>(ua->Address.lpSockaddr);
+            char ip[INET_ADDRSTRLEN]{};
+            inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+            if (std::string(ip) != "127.0.0.1")
+                return ip;
+        }
+    }
+    return "?.?.?.?";
+}
+
+void MainWindow::regenerateQr() {
+    uint16_t port = m_connectionManager.getReceiver().getPort();
+    std::string ip  = getLocalIpAddress();
+    std::string key = ip + ":" + std::to_string(port);
+    if (key == m_qrLastEncoded) return; // nothing changed
+
+    try {
+        m_qrMatrix      = QrGen::encode(key);
+        m_qrLastEncoded = key;
+    } catch (...) {
+        m_qrMatrix.clear();
+    }
+}
+
+void MainWindow::drawQrCode(HDC hdc, int x, int y, int moduleSize) const {
+    if (m_qrMatrix.empty()) return;
+    int sz = (int)m_qrMatrix.size();
+
+    // White background (quiet zone)
+    int totalPx = sz * moduleSize;
+    HBRUSH bgBrush = CreateSolidBrush(RGB(255, 255, 255));
+    RECT bgRect{x - moduleSize, y - moduleSize,
+                x + totalPx + moduleSize, y + totalPx + moduleSize};
+    FillRect(hdc, &bgRect, bgBrush);
+    DeleteObject(bgBrush);
+
+    // Dark modules
+    HBRUSH darkBrush = CreateSolidBrush(RGB(15, 23, 42)); // same as window bg
+    for (int r = 0; r < sz; r++) {
+        for (int c = 0; c < sz; c++) {
+            if (m_qrMatrix[r][c]) {
+                RECT rc{
+                    x + c * moduleSize,
+                    y + r * moduleSize,
+                    x + c * moduleSize + moduleSize,
+                    y + r * moduleSize + moduleSize
+                };
+                FillRect(hdc, &rc, darkBrush);
+            }
+        }
+    }
+    DeleteObject(darkBrush);
 }
 
 } // namespace GamepadReceiver

@@ -6,3 +6,8 @@ build/
 *.a
 *.pdb
 *.ilk
+
+*.bak
+*.exe
+*.dll
+*.zip

@@ -3,6 +3,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <memory>
+#include <vector>
+#include <string>
 #include "../connection/ConnectionManager.h"
 #include "../utils/SystemTray.h"
 
@@ -27,6 +29,11 @@ private:
     void drawButton(HDC hdc, int x, int y, int radius, bool pressed, COLORREF activeColor, const wchar_t* label);
     void drawDpad(HDC hdc, int centerX, int centerY, uint8_t dpadMask);
 
+    // QR code support
+    void drawQrCode(HDC hdc, int x, int y, int moduleSize) const;
+    void regenerateQr();
+    static std::string getLocalIpAddress();
+
     HINSTANCE m_hInstance;
     HWND      m_hWnd{nullptr};
     HWND      m_btnToggle{nullptr};
@@ -35,8 +42,12 @@ private:
     ConnectionManager& m_connectionManager;
     std::unique_ptr<SystemTray> m_tray;
 
-    static constexpr UINT ID_BTN_TOGGLE = 1001;
-    static constexpr UINT ID_EDIT_PORT  = 1002;
+    // QR code cache  (regenerated when IP/port changes)
+    std::vector<std::vector<bool>> m_qrMatrix;
+    std::string m_qrLastEncoded; // what was encoded, to detect changes
+
+    static constexpr UINT ID_BTN_TOGGLE  = 1001;
+    static constexpr UINT ID_EDIT_PORT   = 1002;
     static constexpr UINT TIMER_UI_REFRESH = 1;
 };
 

@@ -26,6 +26,7 @@ add_executable(WindowsGamepadReceiver WIN32
 target_link_libraries(WindowsGamepadReceiver PRIVATE
     ws2_32
     comctl32
+    iphlpapi
 )
 
 # 2. Standalone Unit Tests Executable
